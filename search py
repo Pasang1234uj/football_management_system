@@ -1,0 +1,134 @@
+"""
+search.py
+---------
+Search teams, fixtures, results and announcements from one page.
+"""
+import tkinter as tk
+from tkinter import ttk
+
+import mysql.connector
+
+import ui
+from database import get_fixtures, pool_names, query
+
+TABS = ["Teams", "Fixtures", "Results", "Announcements"]
+
+COLUMNS = {
+    "Teams": (("#", "Team Name", "Category", "Pool", "Coach"), (50, 240, 100, 100, 220), ("Team Name", "Coach")),
+    "Fixtures": (("#", "Date", "Time", "Category", "Pool", "Home Team", "Away Team", "Venue"),
+                 (45, 110, 90, 80, 80, 170, 170, 130), ("Home Team", "Away Team", "Venue")),
+    "Results": (("#", "Date", "Category", "Pool", "Home Team", "Score", "Away Team"),
+                (45, 110, 80, 80, 190, 80, 190), ("Home Team", "Away Team")),
+    "Announcements": (("#", "Date", "Title", "Posted By"), (50, 120, 400, 140), ("Title",)),
+}
+
+
+class SearchPage(tk.Frame):
+    def init(self, parent, app):
+        super().init(parent, bg=ui.BG)
+        self.app = app
+        self.tab = "Teams"
+        self.table_frame = None
+        ui.page_header(self, "Search")
+
+        # tab buttons
+        self.tab_bar = tk.Frame(self, bg=ui.BG)
+        self.tab_bar.pack(fill="x", padx=24, pady=(0, 10))
+        self.tab_buttons = {}
+        for name in TABS:
+            b = ui.button(self.tab_bar, name, lambda n=name: self.set_tab(n), "outline")
+            b.pack(side="left", padx=(0, 6))
+            self.tab_buttons[name] = b
+
+        # filters
+        bar = tk.Frame(self, bg=ui.BG)
+        bar.pack(fill="x", padx=24, pady=(0, 10))
+        sbox = tk.Frame(bar, bg=ui.BG)
+        sbox.pack(side="left", fill="x", expand=True, padx=(0, 14))
+        tk.Label(sbox, text="Search", font=ui.FONT_SMALL, bg=ui.BG, fg=ui.MUTED).pack(anchor="w")
+        self.term = tk.StringVar()
+        entry = ttk.Entry(sbox, textvariable=self.term, font=ui.FONT)
+        entry.pack(fill="x")
+        entry.bind("<KeyRelease>", lambda e: self.run())
+        box, self.cat, self.cat_cb = ui.labeled_combo(bar, "Category", ["All", "Boys", "Girls"], "All",
+                                                      width=10, command=self.category_changed)
+        box.pack(side="left", padx=(0, 14))
+        box, self.pool, self.pool_cb = ui.labeled_combo(bar, "Pool", ["All"] + pool_names(), "All",
+                                                        width=10, command=self.run)
+        box.pack(side="left")
+
+        self.set_tab("Teams")
+
+    def category_changed(self):
+        cat = self.cat.get()
+        self.pool_cb["values"] = ["All"] + pool_names(None if cat == "All" else cat)
+        self.pool.set("All")
+        self.run()
+
+    def set_tab(self, name):
+        self.tab = name
+        for n, b in self.tab_buttons.items():
+            b.config(bg=ui.BLUE if n == name else ui.WHITE, fg="white" if n == name else ui.BLUE)
+        state = "disabled" if name == "Announcements" else "readonly"
+        self.cat_cb.config(state=state)
+        self.pool_cb.config(state=state)
+
+        if self.table_frame:
+            self.table_frame.destroy()
+        columns, widths, left = COLUMNS[name]
+        self.table_frame, self.tree = ui.make_table(self, columns, widths, left=left)
+        self.table_frame.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        self.run()
+
+    def run(self):
+        like = f"%{self.term.get().strip()}%"
+        cat, pool = self.cat.get(), self.pool.get()
+        try:
+            if self.tab == "Teams":
+                self.search_teams(like, cat, pool)
+            elif self.tab in ("Fixtures", "Results"):
+                self.search_fixtures(like, cat, pool)
+            else:
+                self.search_announcements(like)
+        except mysql.connector.Error as e:
+            ui.show_db_error(e)
+
+def search_teams(self, like, cat, pool):
+        sql = ("SELECT t.id, t.name, t.category, p.name AS pool, t.coach FROM teams t "
+               "JOIN pools p ON p.id = t.pool_id WHERE (t.name LIKE %s OR t.coach LIKE %s)")
+        params = [like, like]
+        if cat != "All":
+            sql += " AND t.category=%s"
+            params.append(cat)
+        if pool != "All":
+            sql += " AND p.name=%s"
+            params.append(pool)
+        rows = query(sql + " ORDER BY t.category, p.name, t.name", params)
+        ui.fill_table(self.tree, [(i + 1, r["name"], r["category"], r["pool"], r["coach"] or "")
+                                  for i, r in enumerate(rows)], [r["id"] for r in rows])
+
+    def search_fixtures(self, like, cat, pool):
+        cond = ["(h.name LIKE %s OR a.name LIKE %s OR f.venue LIKE %s)"]
+        params = [like, like, like]
+        if self.tab == "Results":
+            cond.append("f.status='Completed'")
+        if cat != "All":
+            cond.append("f.category=%s")
+            params.append(cat)
+        if pool != "All":
+            cond.append("p.name=%s")
+            params.append(pool)
+        rows = get_fixtures(" AND ".join(cond), params, order="f.match_date DESC, f.match_time DESC")
+        if self.tab == "Fixtures":
+            data = [(i + 1, ui.fmt_date(r["match_date"]), ui.fmt_time(r["match_time"]), r["category"],
+                     r["pool"], r["home"], r["away"], r["venue"]) for i, r in enumerate(rows)]
+        else:
+            data = [(i + 1, ui.fmt_date(r["match_date"]), r["category"], r["pool"], r["home"],
+                     f"{r['home_score']} - {r['away_score']}", r["away"]) for i, r in enumerate(rows)]
+        ui.fill_table(self.tree, data, [r["id"] for r in rows])
+
+    def search_announcements(self, like):
+        rows = query("SELECT id, title, posted_by, created_at FROM announcements "
+                     "WHERE title LIKE %s OR message LIKE %s ORDER BY created_at DESC", (like, like))
+        ui.fill_table(self.tree, [(i + 1, ui.fmt_date(r["created_at"]), r["title"], r["posted_by"])
+                                  for i, r in enumerate(rows)], [r["id"] for r in rows])
